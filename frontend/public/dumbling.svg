@@ -1,0 +1,25 @@
+<svg width="240" height="160" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 160" fill="none" stroke="black" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" font-family="Comic Sans MS, sans-serif">
+  <!-- DumbLing Text -->
+  <text x="20" y="30" font-size="32" font-weight="bold">DumbLing</text>
+  
+  <!-- Broken Scroll -->
+  <rect x="20" y="50" width="60" height="80" rx="12" ry="12" stroke="black" fill="none"/>
+  <!-- Cracks -->
+  <path d="M25 60 L30 65 L25 75 M40 55 L50 65 L45 75 M35 100 L40 105 L35 110" stroke="black"/>
+  <!-- Question marks -->
+  <text x="35" y="90" font-size="24" font-weight="bold">??</text>
+  
+  <!-- Arrow -->
+  <line x1="85" y1="90" x2="115" y2="90" stroke="black"/>
+  <polyline points="115,90 110,85 110,95" fill="black"/>
+  
+  <!-- Grid table -->
+  <rect x="130" y="50" width="80" height="80" stroke="black" fill="none"/>
+  <!-- Vertical lines -->
+  <line x1="150" y1="50" x2="150" y2="130"/>
+  <line x1="170" y1="50" x2="170" y2="130"/>
+  <!-- Horizontal lines -->
+  <line x1="130" y1="70" x2="210" y2="70"/>
+  <line x1="130" y1="90" x2="210" y2="90"/>
+  <line x1="130" y1="110" x2="210" y2="110"/>
+</svg>
