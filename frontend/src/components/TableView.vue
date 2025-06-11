@@ -29,6 +29,8 @@ const searchText = ref('')
 const pageCount = computed(() => Math.ceil(total.value / perPage.value))
 const editingPage = ref(false)
 const editPageValue = ref(page.value)
+const evaluatingRow = ref<number|null>(null)
+const evalResult = ref<Record<number, { score: number; reason: string }>>({})
 
 function startEditPage() {
   editPageValue.value = page.value
@@ -150,6 +152,28 @@ async function setAllCompleted() {
     alert(e.message)
   }
 }
+
+async function evaluateTranslation(row: TranslationRow) {
+  evaluatingRow.value = row.id
+  try {
+    const res = await fetch('http://localhost:8000/evaluate-translation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: row.parsed_string_text, translation: row.translation })
+    })
+    if (!res.ok) throw new Error('Evaluation failed')
+    const data = await res.json()
+    evalResult.value = { ...evalResult.value, [row.id]: data }
+    // Update the row in the table immediately
+    row.confidence = data.score
+    row.reason = data.reason
+  } catch (e: any) {
+    evalResult.value = { ...evalResult.value, [row.id]: { score: 0, reason: e.message } }
+  } finally {
+    evaluatingRow.value = null
+  }
+}
+
 // hooks and other setup
 watch([() => props.projectId, page, perPage, flagFilter, statusFilter, () => props.refreshKey], fetchStrings, { immediate: true })
 defineExpose({ editingPage, editPageValue, startEditPage, commitEditPage, toggleStatus, setAllCompleted })
@@ -200,6 +224,7 @@ onMounted(fetchStrings)
             <th>Reason</th>
             <th>Flag</th>
             <th>Hashcode</th>
+            <th>Evaluate</th>
           </tr>
         </thead>
         <tbody>
@@ -207,19 +232,29 @@ onMounted(fetchStrings)
             <!-- <td>{{ row.id }}</td> -->
             <td>{{ row.file_uri }}</td>
             <td>{{ row.parsed_string_text }}</td>
-            <td>{{ row.translation }}</td>
+            <td>
+              <div style="display:flex; gap:0.5rem; align-items:center;">
+                <span v-if="evaluatingRow !== row.id" style="cursor:pointer; text-decoration:underline;" @click="evaluateTranslation(row)">
+                  {{ row.translation }}
+                </span>
+                <span v-else>Evaluating...</span>
+              </div>
+            </td>
             <td>
               <button @click="toggleStatus(row)">{{ row.status === 'completed' ? '✅' : '⬜' }}</button>
             </td>
             <td>{{ row.confidence }}</td>
             <td>
               <textarea
-                
                 v-model="row.reason"
                 @blur="updateReason(row)"
                 :placeholder="'Edit reason'"
                 style="width: 12em;"
               />
+              <!-- <div style="margin-top:0.5em;">
+                <button @click="evaluateTranslation(row)" :disabled="evaluatingRow === row.id">Eval</button>
+                <span v-if="evalResult[row.id]">Score: {{ evalResult[row.id].score }}<br/>Reason: {{ evalResult[row.id].reason }}</span>
+              </div> -->
             </td>
             <td>
               <button @click="toggleFlag(row)">{{ row.flag === 1 ? '✅' : '⬜' }}</button>
@@ -227,6 +262,15 @@ onMounted(fetchStrings)
             <td style="font-family:monospace;max-width:12rem;overflow-x:auto;">
               <a v-if="row.hashcode" :href="`https://dashboard.smartling.com/app/projects/${props.projectId}/strings/?hashcodes=${row.hashcode}&localeIds=ja-JP`" target="_blank" rel="noopener noreferrer">{{ row.hashcode }}</a>
               <span v-else>-</span>
+            </td>
+            <td>
+              <button @click="evaluateTranslation(row)" :disabled="evaluatingRow === row.id">
+                {{ evaluatingRow === row.id ? 'Evaluating...' : 'Evaluate' }}
+              </button>
+              <div v-if="evalResult[row.id]">
+                <span>Score: {{ evalResult[row.id].score }}</span><br/>
+                <span>Reason: {{ evalResult[row.id].reason }}</span>
+              </div>
             </td>
           </tr>
         </tbody>

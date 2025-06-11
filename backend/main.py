@@ -10,6 +10,87 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
+from fastapi import APIRouter
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+MODEL_PATH = "microsoft/Phi-4-mini-instruct"
+torch.random.manual_seed(0)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
+    device_map="auto",
+    torch_dtype="auto",
+    trust_remote_code=False,
+)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+pipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+)
+DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
+
+def init_db():
+    #sql sql sql dance
+    if not os.path.exists(DB_PATH):
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        open(DB_PATH, 'a').close()
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS strings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            japanese TEXT NOT NULL,
+            confidence REAL,
+            reason TEXT,
+            suggestion TEXT
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS smartling_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            secret TEXT NOT NULL,
+            project_id TEXT,
+            job_id TEXT,
+            access_token TEXT,
+            refresh_token TEXT,
+            token_expires INTEGER,
+            account_id TEXT,
+            locale TEXT
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS job_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            file_uri TEXT NOT NULL,
+            project_id TEXT
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            file_uri TEXT NOT NULL,
+            project_id TEXT NOT NULL
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS smartling_translations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL,
+            file_uri TEXT NOT NULL,
+            locale TEXT NOT NULL,
+            parsed_string_text TEXT,
+            translation TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            confidence REAL,
+            reason TEXT,
+            flag INTEGER,
+            hashcode TEXT UNIQUE
+        )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        file_uri TEXT NOT NULL,
+        project_id TEXT NOT NULL
+    )''')
+    conn.commit()
+init_db()
+
+
 
 app = FastAPI()
 @app.post("/admin/smartling-toggle-status")
@@ -86,68 +167,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
-
-def init_db():
-    #sql sql sql dance
-    if not os.path.exists(DB_PATH):
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        open(DB_PATH, 'a').close()
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS strings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            japanese TEXT NOT NULL,
-            confidence REAL,
-            reason TEXT,
-            suggestion TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS smartling_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            secret TEXT NOT NULL,
-            project_id TEXT,
-            job_id TEXT,
-            access_token TEXT,
-            refresh_token TEXT,
-            token_expires INTEGER,
-            account_id TEXT,
-            locale TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS job_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT NOT NULL,
-            file_uri TEXT NOT NULL,
-            project_id TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT NOT NULL,
-            file_uri TEXT NOT NULL,
-            project_id TEXT NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS smartling_translations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id TEXT NOT NULL,
-            file_uri TEXT NOT NULL,
-            locale TEXT NOT NULL,
-            parsed_string_text TEXT,
-            translation TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            confidence REAL,
-            reason TEXT,
-            flag INTEGER,
-            hashcode TEXT UNIQUE
-        )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id TEXT NOT NULL,
-        file_uri TEXT NOT NULL,
-        project_id TEXT NOT NULL
-    )''')
-    conn.commit()
-init_db()
 
 class StringPair(BaseModel):
     id: Optional[int]
@@ -682,3 +701,57 @@ async def smartling_toggle_flag(data: dict = Body(...)):
         c.execute("UPDATE smartling_translations SET flag=? WHERE id=?", (flag, row_id))
         conn.commit()
     return {"success": True}
+
+generation_args = {
+    "max_new_tokens": 500,
+    "return_full_text": False,
+    "temperature": 0.0,
+    "do_sample": False,
+}
+
+class TranslationEvalRequest(BaseModel):
+    source: str
+    translation: str
+
+class TranslationEvalResponse(BaseModel):
+    score: int
+    reason: str
+
+@app.post("/evaluate-translation", response_model=TranslationEvalResponse)
+def evaluate_translation(req: TranslationEvalRequest):
+    import re, json
+    system_prompt = (
+    "You are an evaluation assistant. The user will send in a source and translation. Compare the two and evaluate the translation, providing a confidence score with a reason. Ensure that the Japanese translation sounds natural. If there are any ways to improve the translation, include suggestions and provide an example sentence in Japanese. The reason and example SHOULD be included inside the {reason}. ONLY return a valid JSON object with keys 'score' (int, 0-100) and 'reason' (string). "
+    "Do NOT include any explanation or text outside the JSON. Example: {\"score\": 95, \"reason\": \"Accurate and natural translation.\"} ONLY return one JSON object with the keys 'score' and 'reason'. "
+)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f'{{"source": "{req.source}", "translation": "{req.translation}"}}'},
+    ]
+    output = pipe(messages, **generation_args)
+    raw = output[0]['generated_text']
+    try:
+        result = json.loads(raw)
+    except Exception:
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(0))
+            except Exception as e2:
+                return TranslationEvalResponse(score=0, reason=f"Model output parse error: {str(e2)} | Raw: {raw}")
+        else:
+            return TranslationEvalResponse(score=0, reason=f"Model output parse error: No JSON found | Raw: {raw}")
+    try:
+        score = int(result.get('score', 0))
+        reason = result.get('reason', '')
+    except Exception as e:
+        return TranslationEvalResponse(score=0, reason=f"Model output parse error: {str(e)} | Raw: {raw}")
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("UPDATE smartling_translations SET confidence=?, reason=? WHERE parsed_string_text=? AND translation=?", (score, reason, req.source, req.translation))
+            conn.commit()
+    except Exception as db_exc:
+        print(f"[DB ERROR] Could not update confidence/reason: {db_exc}")
+    print(f"[Translation Eval] Score: {score}, Reason: {reason}")
+    return TranslationEvalResponse(score=score, reason=reason)
