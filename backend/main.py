@@ -13,6 +13,28 @@ from typing import List, Optional
 from fastapi import APIRouter
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+#Setup LLM 
+class TranslationEvalRequest(BaseModel):
+    source: str
+    translation: str
+
+class TranslationEvalResponse(BaseModel):
+    score: int
+    reason: str
+
+class StringPair(BaseModel):
+    id: Optional[int]
+    source: str
+    japanese: str
+    confidence: Optional[float] = None
+    reason: Optional[str] = None
+    suggestion: Optional[str] = None
+class EvaluationRequest(BaseModel):
+    id: int
+    source: str
+    japanese: str
+
 MODEL_PATH = "microsoft/Phi-4-mini-instruct"
 torch.random.manual_seed(0)
 model = AutoModelForCausalLM.from_pretrained(
@@ -27,7 +49,14 @@ pipe = pipeline(
     model=model,
     tokenizer=tokenizer,
 )
+generation_args = {
+    "max_new_tokens": 500,
+    "return_full_text": False,
+    "temperature": 0.0,
+    "do_sample": False,
+}
 DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
+
 
 def init_db():
     #sql sql sql dance
@@ -89,7 +118,6 @@ def init_db():
     )''')
     conn.commit()
 init_db()
-
 
 
 app = FastAPI()
@@ -166,20 +194,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class StringPair(BaseModel):
-    id: Optional[int]
-    source: str
-    japanese: str
-    confidence: Optional[float] = None
-    reason: Optional[str] = None
-    suggestion: Optional[str] = None
-
-class EvaluationRequest(BaseModel):
-    id: int
-    source: str
-    japanese: str
 
 @app.get("/strings", response_model=List[StringPair])
 def get_strings():
@@ -702,26 +716,11 @@ async def smartling_toggle_flag(data: dict = Body(...)):
         conn.commit()
     return {"success": True}
 
-generation_args = {
-    "max_new_tokens": 500,
-    "return_full_text": False,
-    "temperature": 0.0,
-    "do_sample": False,
-}
-
-class TranslationEvalRequest(BaseModel):
-    source: str
-    translation: str
-
-class TranslationEvalResponse(BaseModel):
-    score: int
-    reason: str
-
 @app.post("/evaluate-translation", response_model=TranslationEvalResponse)
 def evaluate_translation(req: TranslationEvalRequest):
     import re, json
     system_prompt = (
-    "You are an evaluation assistant. The user will send in a source and translation. Compare the two and evaluate the translation, providing a confidence score with a reason. Ensure that the Japanese translation sounds natural. If there are any ways to improve the translation, include suggestions and provide an example sentence in Japanese. The reason and example SHOULD be included inside the {reason}. ONLY return a valid JSON object with keys 'score' (int, 0-100) and 'reason' (string). "
+    "You are an evaluation assistant. The user will send in a source and translation. Compare the two and evaluate the translation, providing a confidence score with a reason. Ensure that the given translation sounds natural. If there are any ways to improve the translation, include suggestions and provide an example sentence in Japanese. The reason and example SHOULD be included inside the {reason}. ONLY return a valid JSON object with keys 'score' (int, 0-100) and 'reason' (string). "
     "Do NOT include any explanation or text outside the JSON. Example: {\"score\": 95, \"reason\": \"Accurate and natural translation.\"} ONLY return one JSON object with the keys 'score' and 'reason'. "
 )
     messages = [
