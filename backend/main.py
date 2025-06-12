@@ -80,7 +80,6 @@ generation_args = {
     "do_sample": False,
 }
 def init_db():
-   
 
     #sql sql sql dance
     if not os.path.exists(DB_PATH):
