@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, watch, computed, nextTick } from 'vue'
 
 
 interface TranslationRow {
@@ -164,7 +164,6 @@ async function evaluateTranslation(row: TranslationRow) {
     if (!res.ok) throw new Error('Evaluation failed')
     const data = await res.json()
     evalResult.value = { ...evalResult.value, [row.id]: data }
-    // Update the row in the table immediately
     row.confidence = data.score
     row.reason = data.reason
   } catch (e: any) {
@@ -173,6 +172,22 @@ async function evaluateTranslation(row: TranslationRow) {
     evaluatingRow.value = null
   }
 }
+
+function autoResizeReasonInput(event: Event) {
+  const textarea = event.target as HTMLTextAreaElement;
+  textarea.style.height = 'auto';
+  textarea.style.height = textarea.scrollHeight + 'px';
+}
+
+watch(strings, () => {
+  nextTick(() => {
+    const textareas = document.querySelectorAll('.reason-input') as NodeListOf<HTMLTextAreaElement>;
+    textareas.forEach(t => {
+      t.style.height = 'auto';
+      t.style.height = t.scrollHeight + 'px';
+    });
+  });
+});
 
 // hooks and other setup
 watch([() => props.projectId, page, perPage, flagFilter, statusFilter, () => props.refreshKey], fetchStrings, { immediate: true })
@@ -246,10 +261,13 @@ onMounted(fetchStrings)
             <td>{{ row.confidence }}</td>
             <td>
               <textarea
+                class="reason-input"
                 v-model="row.reason"
                 @blur="updateReason(row)"
                 :placeholder="'Edit reason'"
                 style="width: 12em;"
+                @input="autoResizeReasonInput"
+                ref="reasonTextarea"
               />
               <!-- <div style="margin-top:0.5em;">
                 <button @click="evaluateTranslation(row)" :disabled="evaluatingRow === row.id">Eval</button>
@@ -296,6 +314,16 @@ onMounted(fetchStrings)
 </template>
 
 <style scoped>
+.reason-input {
+  width: 100%;
+  min-height: 2em;
+  font-family: monospace;
+  
+}
+
+.reason-input {
+  transition: height 0.1s;
+}
 table {
   width: 100%;
   border-collapse: collapse;

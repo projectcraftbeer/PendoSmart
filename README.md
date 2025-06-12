@@ -52,10 +52,9 @@ A web app for evaluating smartling strings with LLM-powered scoring.
 ---
 
 ## Notes
-- The Docker compose setup is currently broken and will not work. TODO: WIP
+- The Docker compose setup is currently broken and will not work.
 - The backend loads a large language model on startup; first load may take time.
 - Database is stored in `backend/strings.db` (SQLite).
-- For production, consider using a persistent database and a model server.
 
 ---
 
@@ -81,3 +80,8 @@ A web app for evaluating smartling strings with LLM-powered scoring.
 
 6. **Evaluate Translations**
    - You can use the local LLM (phi4mini) to evaluate a string if it's a valid translation by clicking the Evaluate button.
+
+## Known Issues (AKA TODO)
+Docker compose won't generate .db file. 
+When you search for a string, you need to adjust the page number to 1
+Clicking on the Evaluate button shows results underneath it (no issues with functionality)
