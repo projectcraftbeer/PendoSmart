@@ -34,31 +34,54 @@ class EvaluationRequest(BaseModel):
     id: int
     source: str
     japanese: str
+DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
 
 MODEL_PATH = "microsoft/Phi-4-mini-instruct"
-torch.random.manual_seed(0)
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_PATH,
-    device_map="auto",
-    torch_dtype="auto",
-    trust_remote_code=False,
-)
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-pipe = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-)
+
+def get_setting(key: str, default=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = c.fetchone()
+        return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+# --- Model download flag logic ---
+MODEL_DOWNLOAD_FLAG = get_setting('download_model', 'false') == 'true'
+
+if MODEL_DOWNLOAD_FLAG:
+    torch.random.manual_seed(0)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_PATH,
+        device_map="auto",
+        torch_dtype="auto",
+        trust_remote_code=False,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+    )
+else:
+    model = None
+    tokenizer = None
+    pipe = None
+
 generation_args = {
     "max_new_tokens": 500,
     "return_full_text": False,
     "temperature": 0.0,
     "do_sample": False,
 }
-DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
-
-
 def init_db():
+   
+
     #sql sql sql dance
     if not os.path.exists(DB_PATH):
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -109,6 +132,10 @@ def init_db():
             reason TEXT,
             flag INTEGER,
             hashcode TEXT UNIQUE
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )''')
     c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -726,6 +753,7 @@ def evaluate_translation(req: TranslationEvalRequest):
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f'{{"source": "{req.source}", "translation": "{req.translation}"}}'},
+        {"role": "user", "content": f'{{"source": "{req.source}", "translation": "{req.translation}"}}'},
     ]
     output = pipe(messages, **generation_args)
     raw = output[0]['generated_text']
@@ -754,3 +782,27 @@ def evaluate_translation(req: TranslationEvalRequest):
         print(f"[DB ERROR] Could not update confidence/reason: {db_exc}")
     print(f"[Translation Eval] Score: {score}, Reason: {reason}")
     return TranslationEvalResponse(score=score, reason=reason)
+
+def get_setting(key: str, default=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = c.fetchone()
+        return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+@app.post("/admin/set-model-download-flag")
+def set_model_download_flag(data: dict = Body(...)):
+    flag = data.get("download_model", False)
+    set_setting("download_model", "true" if flag else "false")
+    return {"success": True, "download_model": flag}
+
+@app.get("/admin/get-model-download-flag")
+def get_model_download_flag():
+    flag = get_setting("download_model", "false") == "true"
+    return {"download_model": flag}

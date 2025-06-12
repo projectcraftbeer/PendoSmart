@@ -180,10 +180,45 @@ async function fetchAllTranslations() {
     fetchTranslationsLoading.value = false
   }
 }
+
+const modelDownloadFlag = ref(false)
+const modelDownloadLoading = ref(false)
+const modelDownloadError = ref<string | null>(null)
+
+async function fetchModelDownloadFlag() {
+  try {
+    const res = await fetch('http://localhost:8000/admin/get-model-download-flag')
+    if (!res.ok) throw new Error('Failed to fetch model download flag')
+    const data = await res.json()
+    modelDownloadFlag.value = !!data.download_model
+  } catch (e: any) {
+    modelDownloadError.value = e.message
+  }
+}
+
+async function setModelDownloadFlag(flag: boolean) {
+  modelDownloadLoading.value = true
+  modelDownloadError.value = null
+  try {
+    const res = await fetch('http://localhost:8000/admin/set-model-download-flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ download_model: flag })
+    })
+    if (!res.ok) throw new Error('Failed to set model download flag')
+    modelDownloadFlag.value = flag
+  } catch (e: any) {
+    modelDownloadError.value = e.message
+  } finally {
+    modelDownloadLoading.value = false
+  }
+}
+
 watch(projectId, fetchJobOptions)
 onMounted(() => {
   fetchKeys()
   fetchProjectOptions()
+  fetchModelDownloadFlag()
 })
 </script>
 <template>
@@ -253,6 +288,18 @@ onMounted(() => {
         {{ fetchTranslationsLoading ? 'Fetching...' : 'Fetch All Translated Strings' }}
       </button>
       <span v-if="fetchTranslationsResult" style="margin-left:1rem;">{{ fetchTranslationsResult }}</span>
+    </div>
+    <div style="margin-top:2rem; ;">
+      <h3 style="margin: 0; font-size: 1.1em; font-weight: 600;">AI Model Download</h3>
+      <label style="align-items: center; gap: 0.5em; margin: 0;">
+        <input type="checkbox" v-model="modelDownloadFlag" @change="setModelDownloadFlag(modelDownloadFlag)" :disabled="modelDownloadLoading" style="margin: 0;" />
+        <span>Enable local AI model (download & load on backend)</span>
+      </label>
+      <span v-if="modelDownloadLoading" style="margin-left:0.5em; color: #888;">Saving...</span>
+      <span v-if="modelDownloadError" style="color:red; margin-left:0.5em;">{{ modelDownloadError }}</span>
+    </div>
+    <div style="font-size:0.95em; color:#666; margin-top:0.5em; margin-left:0.5em;">
+      <b>Note:</b> After enabling, restart the backend to download and load the model. Disabling will skip model loading on next restart.
     </div>
   </div>
 </template>
