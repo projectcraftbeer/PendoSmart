@@ -13,72 +13,8 @@ from typing import List, Optional
 from fastapi import APIRouter
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
-#Setup LLM 
-class TranslationEvalRequest(BaseModel):
-    source: str
-    translation: str
-
-class TranslationEvalResponse(BaseModel):
-    score: int
-    reason: str
-
-class StringPair(BaseModel):
-    id: Optional[int]
-    source: str
-    japanese: str
-    confidence: Optional[float] = None
-    reason: Optional[str] = None
-    suggestion: Optional[str] = None
-class EvaluationRequest(BaseModel):
-    id: int
-    source: str
-    japanese: str
 DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
 
-MODEL_PATH = "microsoft/Phi-4-mini-instruct"
-
-def get_setting(key: str, default=None):
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("SELECT value FROM settings WHERE key=?", (key,))
-        row = c.fetchone()
-        return row[0] if row else default
-
-def set_setting(key: str, value: str):
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        conn.commit()
-
-# --- Model download flag logic ---
-MODEL_DOWNLOAD_FLAG = get_setting('download_model', 'false') == 'true'
-
-if MODEL_DOWNLOAD_FLAG:
-    torch.random.manual_seed(0)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        device_map="auto",
-        torch_dtype="auto",
-        trust_remote_code=False,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-    )
-else:
-    model = None
-    tokenizer = None
-    pipe = None
-
-generation_args = {
-    "max_new_tokens": 500,
-    "return_full_text": False,
-    "temperature": 0.0,
-    "do_sample": False,
-}
 def init_db():
     #sql sql sql dance
     if not os.path.exists(DB_PATH):
@@ -143,6 +79,71 @@ def init_db():
     )''')
     conn.commit()
 init_db()
+#Setup LLM 
+class TranslationEvalRequest(BaseModel):
+    source: str
+    translation: str
+
+class TranslationEvalResponse(BaseModel):
+    score: int
+    reason: str
+
+class StringPair(BaseModel):
+    id: Optional[int]
+    source: str
+    japanese: str
+    confidence: Optional[float] = None
+    reason: Optional[str] = None
+    suggestion: Optional[str] = None
+class EvaluationRequest(BaseModel):
+    id: int
+    source: str
+    japanese: str
+
+MODEL_PATH = "microsoft/Phi-4-mini-instruct"
+
+def get_setting(key: str, default=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = c.fetchone()
+        return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+# --- Model download flag logic ---
+MODEL_DOWNLOAD_FLAG = get_setting('download_model', 'false') == 'true'
+
+if MODEL_DOWNLOAD_FLAG:
+    torch.random.manual_seed(0)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_PATH,
+        device_map="auto",
+        torch_dtype="auto",
+        trust_remote_code=False,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+    )
+else:
+    model = None
+    tokenizer = None
+    pipe = None
+
+generation_args = {
+    "max_new_tokens": 500,
+    "return_full_text": False,
+    "temperature": 0.0,
+    "do_sample": False,
+}
+
 
 
 app = FastAPI()
