@@ -1,3 +1,4 @@
+import concurrent.futures
 import httpx
 import time
 import sqlite3
@@ -430,6 +431,7 @@ async def get_smartling_jobs(project_id: str = Query(...)):
 async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: int = 1, per_page: int = 50):
     import time
     import math
+    import asyncio
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         c.execute("DELETE FROM strings WHERE project_id=? AND locale=?", (project_id, locale))
@@ -445,6 +447,21 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
     now = int(time.time())
     token = access_token
 
+    async def fetch_translation_async(client, project_id, locale, string_id, string_text, token):
+        try:
+            trans_url = f"https://api.smartling.com/strings-api/v2/projects/{project_id}/translations"
+            trans_params = {"targetLocaleId": locale, "stringId": string_id}
+            headers = {"Authorization": f"Bearer {token}"}
+            res = await client.get(trans_url, headers=headers, params=trans_params)
+            translation = ""
+            if res.status_code == 200:
+                trans_data = res.json().get("response", {}).get("data", {})
+                translation = trans_data.get("translation", "")
+            return (string_id, string_text, translation)
+        except Exception as e:
+            print(f"[Async Translation Fetch Error] string_id={string_id}: {e}")
+            return (string_id, string_text, "")
+
     async def fetch_strings(token):
         async with httpx.AsyncClient() as client:
             headers = {"Authorization": f"Bearer {token}"}
@@ -454,26 +471,16 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
                 raise Exception("unauthorized")
             res.raise_for_status()
             items = res.json().get("response", {}).get("data", {}).get("items", [])
-            translations = []
-            for s in items:
-                string_id = s.get("stringId")
-                source = s.get("stringText")
-                trans_url = f"https://api.smartling.com/strings-api/v2/projects/{project_id}/translations"
-                trans_params = {"targetLocaleId": locale}
-                trans_res = await client.get(trans_url, headers=headers, params=trans_params)
-                translation = ""
-               
-                if trans_res.status_code == 200:
-                    print(f"[Smartling Translations API response]", trans_res.json())
-                    trans_data = trans_res.json().get("response", {}).get("data", {})
-                    translation = trans_data.get("translation", "")
-                translations.append((string_id, source, translation))
+            # Launch all translation fetches concurrently
+            tasks = [fetch_translation_async(client, project_id, locale, s.get("stringId"), s.get("stringText"), token) for s in items]
+            translations = await asyncio.gather(*tasks)
             with sqlite3.connect(DB_PATH) as conn:
                 c = conn.cursor()
                 for string_id, source, translation in translations:
                     c.execute("INSERT OR REPLACE INTO strings (id, source, translation, project_id, locale) VALUES (?, ?, ?, ?, ?)", (string_id, source, translation, project_id, locale))
                 conn.commit()
             return translations
+
     if not token or (token_expires and now >= token_expires):
         token = None
     tried_refresh = False
@@ -500,7 +507,7 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
             print("[Smartling Strings Error]", e)
             import traceback; traceback.print_exc()
             return JSONResponse(status_code=500, content={"error": str(e)})
-        
+         
 @app.get("/admin/smartling-job-files")
 def get_job_files(project_id: str):
     with sqlite3.connect(DB_PATH) as conn:
