@@ -1,7 +1,10 @@
-import concurrent.futures
+from fastapi import Depends
+from jose import jwt, JWTError
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import requests
 import httpx
 import time
-import sqlite3
+import pyodbc
 import os
 import httpx
 import logging
@@ -12,74 +15,93 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from fastapi import APIRouter
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-DB_PATH = os.path.join(os.path.dirname(__file__), 'strings.db')
+# import torch
+# from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+# SQL Server ODBC connection string
+from dotenv import load_dotenv
+load_dotenv()
+SQLSERVER_CONN_STR = os.getenv("SQLSERVER_CONN_STR")
 
-def init_db():
-    #sql sql sql dance
-    if not os.path.exists(DB_PATH):
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        open(DB_PATH, 'a').close()
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS strings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            japanese TEXT NOT NULL,
-            confidence REAL,
-            reason TEXT,
-            suggestion TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS smartling_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            secret TEXT NOT NULL,
-            project_id TEXT,
-            job_id TEXT,
-            access_token TEXT,
-            refresh_token TEXT,
-            token_expires INTEGER,
-            account_id TEXT,
-            locale TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS job_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT NOT NULL,
-            file_uri TEXT NOT NULL,
-            project_id TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT NOT NULL,
-            file_uri TEXT NOT NULL,
-            project_id TEXT NOT NULL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS smartling_translations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id TEXT NOT NULL,
-            file_uri TEXT NOT NULL,
-            locale TEXT NOT NULL,
-            parsed_string_text TEXT,
-            translation TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            confidence REAL,
-            reason TEXT,
-            flag INTEGER,
-            hashcode TEXT UNIQUE
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS smartling_job_files (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id TEXT NOT NULL,
-        file_uri TEXT NOT NULL,
-        project_id TEXT NOT NULL
-    )''')
-    conn.commit()
-init_db()
+
+def get_conn():
+    return pyodbc.connect(SQLSERVER_CONN_STR)
+
+# Azure AD config
+AZURE_TENANT_ID = "4dfe54a2-3e8d-49a6-978b-1958ab23ebdd"  # <-- your tenant ID
+AZURE_CLIENT_ID = "d571e058-aef2-44a0-b229-e4e1a3d933ab"   # <-- your app registration client ID
+AZURE_ISSUER = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0"
+AZURE_JWKS_URI = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys"
+ADMIN_ROLE = "admin"  # app role value
+
+security = HTTPBearer()
+
+def get_jwks():
+    resp = requests.get(AZURE_JWKS_URI)
+    resp.raise_for_status()
+    return resp.json()
+
+def verify_jwt(token: str):
+    import logging
+    jwks = get_jwks()
+    try:
+        # Try api://client_id first, then client_id
+        try:
+            payload = jwt.decode(
+                token,
+                jwks,
+                algorithms=["RS256"],
+                audience=f"api://{AZURE_CLIENT_ID}",
+                issuer=[
+                    f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0",
+                    f"https://sts.windows.net/{AZURE_TENANT_ID}/"
+                ]
+            )
+            logging.info(f"JWT payload: {payload}")
+            return payload
+        except JWTError as e1:
+            logging.warning(f"JWT decode error with api:// audience: {str(e1)}")
+            try:
+                payload = jwt.decode(
+                    token,
+                    jwks,
+                    algorithms=["RS256"],
+                    audience=AZURE_CLIENT_ID,
+                    issuer=[
+                        f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0",
+                        f"https://sts.windows.net/{AZURE_TENANT_ID}/"
+                    ]
+                )
+                logging.info(f"JWT payload: {payload}")
+                return payload
+            except JWTError as e2:
+                logging.error(f"JWT decode error: {str(e2)}")
+                raise HTTPException(status_code=401, detail=f"Invalid token: {str(e2)}")
+        logging.info(f"JWT payload: {payload}")
+        return payload
+    except JWTError as e:
+        logging.error(f"JWT decode error: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+def require_admin_role(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    payload = verify_jwt(token)
+    roles = payload.get("roles", [])
+    if isinstance(roles, str):
+        roles = [roles]
+    if ADMIN_ROLE not in roles:
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return payload
+
+def require_admin_or_user_role(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    payload = verify_jwt(token)
+    roles = payload.get("roles", [])
+    if isinstance(roles, str):
+        roles = [roles]
+    if "admin" not in roles and "User" not in roles:
+        raise HTTPException(status_code=403, detail="Admin or User role required")
+    return payload
+
 #Setup LLM 
 class TranslationEvalRequest(BaseModel):
     source: str
@@ -104,39 +126,41 @@ class EvaluationRequest(BaseModel):
 MODEL_PATH = "microsoft/Phi-4-mini-instruct"
 
 def get_setting(key: str, default=None):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        c.execute("SELECT value FROM settings WHERE [key]=?", (key,))
         row = c.fetchone()
         return row[0] if row else default
 
 def set_setting(key: str, value: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        c.execute("UPDATE settings SET value=? WHERE [key]=?", (value, key))
+        if c.rowcount == 0:
+            c.execute("INSERT INTO settings ([key], value) VALUES (?, ?)", (key, value))
         conn.commit()
 
 # --- Model download flag logic ---
-MODEL_DOWNLOAD_FLAG = get_setting('download_model', 'false') == 'true'
+# MODEL_DOWNLOAD_FLAG = get_setting('download_model', 'false') == 'true'
 
-if MODEL_DOWNLOAD_FLAG:
-    torch.random.manual_seed(0)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        device_map="auto",
-        torch_dtype="auto",
-        trust_remote_code=False,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-    )
-else:
-    model = None
-    tokenizer = None
-    pipe = None
+# if MODEL_DOWNLOAD_FLAG:
+#     torch.random.manual_seed(0)
+#     model = AutoModelForCausalLM.from_pretrained(
+#         MODEL_PATH,
+#         device_map="auto",
+#         torch_dtype="auto",
+#         trust_remote_code=False,
+#     )
+#     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+#     pipe = pipeline(
+#         "text-generation",
+#         model=model,
+#         tokenizer=tokenizer,
+#     )
+# else:
+#     model = None
+#     tokenizer = None
+#     pipe = None
 
 generation_args = {
     "max_new_tokens": 500,
@@ -149,50 +173,66 @@ generation_args = {
 
 app = FastAPI()
 @app.post("/admin/smartling-toggle-status")
-async def smartling_toggle_status(data: dict = Body(...)):
+async def smartling_toggle_status(data: dict = Body(...), user=Depends(require_admin_or_user_role)):
     row_id = data.get("id")
     status = data.get("status")
     if row_id is None or status not in ("pending", "completed"):
         return JSONResponse(status_code=400, content={"success": False, "message": "Missing id or invalid status"})
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("UPDATE smartling_translations SET status=? WHERE id=?", (status, row_id))
         conn.commit()
     return {"success": True}
 
 @app.post("/admin/smartling-bulk-complete")
-async def smartling_bulk_complete(data: dict = Body(...)):
+async def smartling_bulk_complete(data: dict = Body(...), user=Depends(require_admin_or_user_role)):
     ids = data.get("ids")
     if not ids or not isinstance(ids, list):
         return JSONResponse(status_code=400, content={"success": False, "message": "Missing or invalid ids list"})
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.executemany("UPDATE smartling_translations SET status='completed' WHERE id=?", [(i,) for i in ids])
         conn.commit()
     return {"success": True, "updated": len(ids)}
 
-async def refresh_smartling_token(refresh_token, user_id, secret, DB_PATH):
+async def refresh_smartling_token(refresh_token, user_id, secret):
     async with httpx.AsyncClient() as client:
-        res = await client.post(
-            "https://api.smartling.com/auth-api/v2/authenticate/refresh",
-            json={"refreshToken": refresh_token}
-        )
-        res.raise_for_status()
-        data = res.json()
-        new_access_token = data.get('response', {}).get('data', {}).get('accessToken')
-        new_refresh_token = data.get('response', {}).get('data', {}).get('refreshToken')
-        expires_in = data.get('response', {}).get('data', {}).get('expiresIn')
-        new_token_expires = int(time.time()) + int(expires_in) if expires_in else None
-        with sqlite3.connect(DB_PATH) as conn:
+        try:
+            res = await client.post(
+                "https://api.smartling.com/auth-api/v2/authenticate/refresh",
+                json={"refreshToken": refresh_token}
+            )
+            res.raise_for_status()
+            data = res.json()
+            new_access_token = data.get('response', {}).get('data', {}).get('accessToken')
+            new_refresh_token = data.get('response', {}).get('data', {}).get('refreshToken')
+            expires_in = data.get('response', {}).get('data', {}).get('expiresIn')
+            new_token_expires = int(time.time()) + int(expires_in) if expires_in else None
+        except httpx.HTTPStatusError as e:
+            # If refresh fails due to expired/invalid token, call smartling-auth
+            if e.response.status_code == 401:
+                auth_res = await client.post(
+                    "https://api.smartling.com/auth-api/v2/authenticate",
+                    json={"userIdentifier": user_id, "userSecret": secret}
+                )
+                auth_res.raise_for_status()
+                data = auth_res.json()
+                new_access_token = data.get('response', {}).get('data', {}).get('accessToken')
+                new_refresh_token = data.get('response', {}).get('data', {}).get('refreshToken')
+                expires_in = data.get('response', {}).get('data', {}).get('expiresIn')
+                new_token_expires = int(time.time()) + int(expires_in) if expires_in else None
+            else:
+                raise
+        with get_conn() as conn:
             c = conn.cursor()
             c.execute("UPDATE smartling_keys SET access_token=?, refresh_token=?, token_expires=? WHERE user_id=? AND secret=?", (new_access_token, new_refresh_token, new_token_expires, user_id, secret))
             conn.commit()
         return new_access_token, new_refresh_token, new_token_expires
 
 @app.post("/admin/flag-matching-strings")
-async def flag_matching_strings(project_id: str = Query(None), locale: str = Query("ja-JP")):
+async def flag_matching_strings(project_id: str = Query(None), locale: str = Query("ja-JP"), user=Depends(require_admin_or_user_role)):
     if not project_id:
-        with sqlite3.connect(DB_PATH) as conn:
+        with get_conn() as conn:
             c = conn.cursor()
             c.execute("SELECT project_id FROM smartling_keys ORDER BY id DESC LIMIT 1")
             row = c.fetchone()
@@ -200,7 +240,7 @@ async def flag_matching_strings(project_id: str = Query(None), locale: str = Que
                 project_id = row[0]
             else:
                 return JSONResponse(status_code=400, content={"success": False, "message": "No project_id found in database and none provided."})
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT id, parsed_string_text, translation FROM smartling_translations WHERE project_id=? AND locale=?", (project_id, locale))
         rows = c.fetchall()
@@ -224,7 +264,7 @@ app.add_middleware(
 
 @app.get("/strings", response_model=List[StringPair])
 def get_strings():
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT id, source, japanese, confidence, reason, suggestion FROM strings")
         rows = c.fetchall()
@@ -232,7 +272,7 @@ def get_strings():
 
 @app.post("/strings", response_model=StringPair)
 def add_string(pair: StringPair):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("INSERT INTO strings (source, japanese) VALUES (?, ?)", (pair.source, pair.japanese))
         conn.commit()
@@ -246,7 +286,7 @@ def evaluate_string(req: EvaluationRequest):
     confidence = 0.85
     reason = "Translation is mostly natural, but could be improved."
     suggestion = "Use より自然な表現 here."
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
             UPDATE strings SET confidence=?, reason=?, suggestion=? WHERE id=?
@@ -255,10 +295,10 @@ def evaluate_string(req: EvaluationRequest):
     return StringPair(id=req.id, source=req.source, japanese=req.japanese, confidence=confidence, reason=reason, suggestion=suggestion)
 
 @app.get("/admin/smartling-keys")
-def get_smartling_keys():
-    with sqlite3.connect(DB_PATH) as conn:
+def get_smartling_keys(user=Depends(require_admin_role)):
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id, secret, project_id, account_id, job_id, locale FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 user_id, secret, project_id, account_id, job_id, locale FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if row:
             return {"user_id": row[0], "secret": row[1], "project_id": row[2], "account_id": row[3], "job_id": row[4], "locale": row[5]}
@@ -266,20 +306,20 @@ def get_smartling_keys():
             return {"user_id": "", "secret": "", "project_id": "", "account_id": "", "job_id": "", "locale": "ja-JP"}
 
 @app.post("/admin/smartling-keys")
-def set_smartling_keys(data: dict):
+def set_smartling_keys(data: dict, user=Depends(require_admin_role)):
     user_id = data.get("user_id", "")
     secret = data.get("secret", "")
     project_id = data.get("project_id", "")
     account_id = data.get("account_id", "")
     job_id = data.get("job_id", "")
     locale = data.get("locale", "ja-JP")
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         # Check if a row exists
-        c.execute("SELECT id FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 id FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if row:
-         # preserve tokens
+            # preserve tokens
             c.execute("""
                 UPDATE smartling_keys
                 SET user_id=?, secret=?, project_id=?, account_id=?, job_id=?, locale=?
@@ -295,9 +335,9 @@ async def get_smartling_projects():
     import time
     SMARTLING_API_URL = None
     account_id = None
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id, secret, project_id, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 user_id, secret, project_id, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if not row:
             return JSONResponse(status_code=400, content={"error": "No Smartling credentials set"})
@@ -324,14 +364,14 @@ async def get_smartling_projects():
     for attempt in range(2):
         try:
             if not token and refresh_token:
-                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret, DB_PATH)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
             if not token:
                 return JSONResponse(status_code=401, content={"error": "No valid Smartling access token. Please authenticate again from the admin page."})
             return await fetch_projects(token)
         except Exception as e:
             if (not tried_refresh) and refresh_token and ("unauthorized" in str(e) or "401" in str(e)):
-                token, _, _ = await refresh_smartling_token(refresh_token)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
                 continue
             print("[Smartling Auth Error]", e)
@@ -343,7 +383,7 @@ class SmartlingAuthRequest(BaseModel):
 
 
 @app.post("/admin/smartling-auth")
-async def smartling_auth(req: SmartlingAuthRequest):
+async def smartling_auth(req: SmartlingAuthRequest, user=Depends(require_admin_role)):
     try:
         async with httpx.AsyncClient() as client:
             res = await client.post(
@@ -361,7 +401,7 @@ async def smartling_auth(req: SmartlingAuthRequest):
             expires_in = data.get('response', {}).get('data', {}).get('expiresIn')
             import time
             token_expires = int(time.time()) + int(expires_in) if expires_in else None
-            with sqlite3.connect(DB_PATH) as conn:
+            with get_conn() as conn:
                 c = conn.cursor()
                 c.execute("UPDATE smartling_keys SET access_token=?, refresh_token=?, token_expires=? WHERE user_id=? AND secret=?", (access_token, refresh_token, token_expires, req.user_id, req.secret))
                 conn.commit()
@@ -372,13 +412,13 @@ async def smartling_auth(req: SmartlingAuthRequest):
 
 # fetch jobs for a given project
 @app.get("/admin/smartling-jobs")
-async def get_smartling_jobs(project_id: str = Query(...)):
+async def get_smartling_jobs(project_id: str = Query(...), user=Depends(require_admin_or_user_role)):
     """Fetch jobs for a given Smartling project ID (requires valid tokens in DB)"""
     import time
     SMARTLING_API_URL = None
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if not row:
             return JSONResponse(status_code=400, content={"error": "No Smartling credentials set"})
@@ -412,14 +452,14 @@ async def get_smartling_jobs(project_id: str = Query(...)):
     for attempt in range(2):
         try:
             if not token and refresh_token:
-                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret, DB_PATH)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
             if not token:
                 return JSONResponse(status_code=401, content={"error": "No valid Smartling access token. Please authenticate again from the admin page."})
             return await fetch_jobs(token)
         except Exception as e:
             if (not tried_refresh) and refresh_token and ("unauthorized" in str(e) or "401" in str(e)):
-                token, _, _ = await refresh_smartling_token(refresh_token)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
                 continue
             print("[Smartling Jobs Error]", e)
@@ -428,17 +468,17 @@ async def get_smartling_jobs(project_id: str = Query(...)):
 
 # fetch and cache Smartling source strings and translations
 @app.get("/admin/smartling-strings")
-async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: int = 1, per_page: int = 50):
+async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: int = 1, per_page: int = 50, user=Depends(require_admin_or_user_role)):
     import time
     import math
     import asyncio
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("DELETE FROM strings WHERE project_id=? AND locale=?", (project_id, locale))
         conn.commit()
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if not row:
             return JSONResponse(status_code=400, content={"error": "No Smartling credentials set"})
@@ -450,7 +490,7 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
     async def fetch_translation_async(client, project_id, locale, string_id, string_text, token):
         try:
             trans_url = f"https://api.smartling.com/strings-api/v2/projects/{project_id}/translations"
-            trans_params = {"targetLocaleId": locale, "stringId": string_id}
+            trans_params = {"targetLocaleId": locale, "stringId": string_id, "retrievalType": "published,pending"}
             headers = {"Authorization": f"Bearer {token}"}
             res = await client.get(trans_url, headers=headers, params=trans_params)
             translation = ""
@@ -474,10 +514,13 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
             # Launch all translation fetches concurrently
             tasks = [fetch_translation_async(client, project_id, locale, s.get("stringId"), s.get("stringText"), token) for s in items]
             translations = await asyncio.gather(*tasks)
-            with sqlite3.connect(DB_PATH) as conn:
+            with get_conn() as conn:
                 c = conn.cursor()
                 for string_id, source, translation in translations:
-                    c.execute("INSERT OR REPLACE INTO strings (id, source, translation, project_id, locale) VALUES (?, ?, ?, ?, ?)", (string_id, source, translation, project_id, locale))
+                    # SQL Server: Use MERGE or try/catch for upsert, but for now, try update then insert
+                    c.execute("UPDATE strings SET source=?, translation=?, project_id=?, locale=? WHERE id=?", (source, translation, project_id, locale, string_id))
+                    if c.rowcount == 0:
+                        c.execute("INSERT INTO strings (id, source, translation, project_id, locale) VALUES (?, ?, ?, ?, ?)", (string_id, source, translation, project_id, locale))
                 conn.commit()
             return translations
 
@@ -487,12 +530,12 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
     for attempt in range(2):
         try:
             if not token and refresh_token:
-                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret, DB_PATH)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
             if not token:
                 return JSONResponse(status_code=401, content={"error": "No valid Smartling access token. Please authenticate again from the admin page."})
             await fetch_strings(token)
-            with sqlite3.connect(DB_PATH) as conn:
+            with get_conn() as conn:
                 c = conn.cursor()
                 c.execute("SELECT COUNT(*) FROM strings WHERE project_id=? AND locale=?", (project_id, locale))
                 count = c.fetchone()[0]
@@ -501,7 +544,7 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
                 return {"total": count, "page": page, "per_page": per_page, "strings": [{"id": row[0], "source": row[1], "translation": row[2]} for row in rows]}
         except Exception as e:
             if (not tried_refresh) and refresh_token and ("unauthorized" in str(e) or "401" in str(e)):
-                token, _, _ = await refresh_smartling_token(refresh_token)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
                 continue
             print("[Smartling Strings Error]", e)
@@ -510,21 +553,21 @@ async def get_smartling_strings(project_id: str, locale: str = "ja-JP", page: in
          
 @app.get("/admin/smartling-job-files")
 def get_job_files(project_id: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT job_id, file_uri FROM smartling_job_files WHERE project_id=?", (project_id,))
         rows = c.fetchall()
         return [{"job_id": row[0], "file_uri": row[1]} for row in rows]
 
 @app.post("/admin/smartling-job-files")
-async def fetch_and_save_job_files(data: dict = Body(...)):
+async def fetch_and_save_job_files(data: dict = Body(...), user=Depends(require_admin_or_user_role)):
     project_id = data.get("project_id")
     if not project_id:
         return JSONResponse(status_code=400, content={"error": "Missing project_id"})
     import time
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if not row:
             return JSONResponse(status_code=400, content={"error": "No Smartling credentials set"})
@@ -553,10 +596,13 @@ async def fetch_and_save_job_files(data: dict = Body(...)):
                     file_uri = f.get("uri") or f.get("fileUri")
                     if file_uri:
                         job_file_pairs.append((job_id, file_uri))
-            with sqlite3.connect(DB_PATH) as conn:
+            with get_conn() as conn:
                 c = conn.cursor()
                 for job_id, file_uri in job_file_pairs:
-                    c.execute("INSERT OR IGNORE INTO smartling_job_files (job_id, file_uri, project_id) VALUES (?, ?, ?)", (job_id, file_uri, project_id))
+                    # Use (job_id, file_uri, project_id) as unique key for upsert
+                    c.execute("UPDATE smartling_job_files SET file_uri=? WHERE job_id=? AND file_uri=? AND project_id=?", (file_uri, job_id, file_uri, project_id))
+                    if c.rowcount == 0:
+                        c.execute("INSERT INTO smartling_job_files (job_id, file_uri, project_id) VALUES (?, ?, ?)", (job_id, file_uri, project_id))
                 conn.commit()
             return job_file_pairs
 
@@ -566,7 +612,7 @@ async def fetch_and_save_job_files(data: dict = Body(...)):
     for attempt in range(2):
         try:
             if not token and refresh_token:
-                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret, DB_PATH)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
             if not token:
                 return JSONResponse(status_code=401, content={"error": "No valid Smartling access token. Please authenticate again from the admin page."})
@@ -574,7 +620,7 @@ async def fetch_and_save_job_files(data: dict = Body(...)):
             return {"saved": len(pairs), "pairs": pairs}
         except Exception as e:
             if (not tried_refresh) and refresh_token and ("unauthorized" in str(e) or "401" in str(e)):
-                token, _, _ = await refresh_smartling_token(refresh_token)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
                 continue
             print("[Smartling Job Files Error]", e)
@@ -583,7 +629,7 @@ async def fetch_and_save_job_files(data: dict = Body(...)):
 
 # fetch and save all translations for all files in a project
 @app.post("/admin/smartling-fetch-translations")
-async def fetch_and_save_translations(data: dict = Body(...)):
+async def fetch_and_save_translations(data: dict = Body(...), user=Depends(require_admin_or_user_role)):
     project_id = data.get("project_id")
     locale = data.get("locale", "ja-JP")
     if not project_id:
@@ -593,13 +639,13 @@ async def fetch_and_save_translations(data: dict = Body(...)):
     #     c = conn.cursor()
     #     c.execute("DELETE FROM smartling_translations WHERE project_id=? AND locale=?", (project_id, locale))
     #     conn.commit()
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT DISTINCT file_uri FROM smartling_job_files WHERE project_id=?", (project_id,))
         file_uris = [row[0] for row in c.fetchall()]
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT TOP 1 user_id, secret, account_id, access_token, refresh_token, token_expires FROM smartling_keys ORDER BY id DESC")
         row = c.fetchone()
         if not row:
             return JSONResponse(status_code=400, content={"error": "No Smartling credentials set"})
@@ -607,47 +653,47 @@ async def fetch_and_save_translations(data: dict = Body(...)):
     now = int(time.time())
     token = access_token
     async def fetch_translations(token):
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=1000.0) as client:
             headers = {"Authorization": f"Bearer {token}"}
             saved_count = 0
             for file_uri in file_uris:
-                offset = 0
-                while True:
-                    url = f"https://api.smartling.com/strings-api/v2/projects/{project_id}/translations"
-                    params = {"targetLocaleId": locale, "fileUri": file_uri, "offset": offset}
-                    res = await client.get(url, headers=headers, params=params)
-                    if res.status_code == 401:
-                        raise Exception("unauthorized")
-                    res.raise_for_status()
-                    items = res.json().get("response", {}).get("data", {}).get("items", [])
-                    if not items:
-                        break
-                    with sqlite3.connect(DB_PATH) as conn:
-                        c = conn.cursor()
-                        for item in items:
-                            parsed = item.get("parsedStringText")
-                            translations = item.get("translations", [])
-                            translation = translations[0]["translation"] if translations and "translation" in translations[0] else None
-                            hashcode = item.get("hashcode")
-                            c.execute("SELECT id, translation, reason, confidence, flag, status FROM smartling_translations WHERE project_id=? AND locale=? AND hashcode=?", (project_id, locale, hashcode))
-                            existing = c.fetchone()
-                            if existing:
-                                current_id, current_translation, current_reason, current_confidence, current_flag, current_status = existing
-                                # don't reset status if translation is the same
-                                if current_translation != translation:
-                                    new_status = 'pending'
+                for retrieval_type in ["pending", "published"]:
+                    offset = 0
+                    while True:
+                        url = f"https://api.smartling.com/strings-api/v2/projects/{project_id}/translations"
+                        params = {"targetLocaleId": locale, "fileUri": file_uri, "offset": offset, "retrievalType": retrieval_type}
+                        res = await client.get(url, headers=headers, params=params)
+                        if res.status_code == 401:
+                            raise Exception("unauthorized")
+                        res.raise_for_status()
+                        items = res.json().get("response", {}).get("data", {}).get("items", [])
+                        print(f"Fetched {len(items)} items for file_uri={file_uri}, retrieval_type={retrieval_type}")
+                        if not items:
+                            break
+                        with get_conn() as conn:
+                            c = conn.cursor()
+                            for item in items:
+                                parsed = item.get("parsedStringText")
+                                translations = item.get("translations", [])
+                                translation = translations[0]["translation"] if translations and "translation" in translations[0] else None
+                                hashcode = item.get("hashcode")
+                                c.execute("SELECT id, translation, reason, confidence, flag, status FROM smartling_translations WHERE project_id=? AND locale=? AND hashcode=?", (project_id, locale, hashcode))
+                                existing = c.fetchone()
+                                if existing:
+                                    current_id, current_translation, current_reason, current_confidence, current_flag, current_status = existing
+                                    # Only update translation and parsed_string_text, keep status as is
+                                    c.execute("UPDATE smartling_translations SET parsed_string_text=?, translation=?, confidence=?, reason=?, flag=? WHERE id=?",
+                                        (parsed, translation, current_confidence, current_reason, current_flag, current_id))
                                 else:
-                                    new_status = current_status
-                                c.execute("UPDATE smartling_translations SET parsed_string_text=?, translation=?, status=?, confidence=?, reason=?, flag=? WHERE id=?",
-                                    (parsed, translation, new_status, current_confidence, current_reason, current_flag, current_id))
-                            else:
-                                c.execute(
-                                    "INSERT INTO smartling_translations (project_id, file_uri, locale, parsed_string_text, translation, status, confidence, reason, flag, hashcode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    (project_id, file_uri, locale, parsed, translation, 'pending', None, None, 0, hashcode)
-                                )
-                            saved_count += 1
-                        conn.commit()
-                    offset += len(items)
+                                    # For new entries, set status to 'pending' (default)
+                                    c.execute(
+                                        "INSERT INTO smartling_translations (project_id, file_uri, locale, parsed_string_text, translation, status, confidence, reason, flag, hashcode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                        (project_id, file_uri, locale, parsed, translation, 'pending', None, None, 0, hashcode)
+                                    )
+                                saved_count += 1
+                            conn.commit()
+                        offset += len(items)
+            print(f"Total saved translations: {saved_count}")
             return saved_count
     if not token or (token_expires and now >= token_expires):
         token = None
@@ -655,7 +701,7 @@ async def fetch_and_save_translations(data: dict = Body(...)):
     for attempt in range(2):
         try:
             if not token and refresh_token:
-                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret, DB_PATH)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
             if not token:
                 return JSONResponse(status_code=401, content={"error": "No valid Smartling access token. Please authenticate again from the admin page."})
@@ -663,7 +709,7 @@ async def fetch_and_save_translations(data: dict = Body(...)):
             return {"saved": count}
         except Exception as e:
             if (not tried_refresh) and refresh_token and ("unauthorized" in str(e) or "401" in str(e)):
-                token, _, _ = await refresh_smartling_token(refresh_token)
+                token, _, _ = await refresh_smartling_token(refresh_token, user_id, secret)
                 tried_refresh = True
                 continue
             print("[Smartling Fetch Translations Error]", e)
@@ -681,7 +727,7 @@ async def get_smartling_translations_table(
     search_type: str = None,
     search_text: str = None
 ):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         query = "SELECT COUNT(*) FROM smartling_translations WHERE project_id=? AND locale=?"
         params = [project_id, locale]
@@ -700,6 +746,7 @@ async def get_smartling_translations_table(
                 params.append(f"%{search_text}%")
         c.execute(query, params)
         count = c.fetchone()[0]
+        # SQL Server: Use TOP for pagination, OFFSET requires ORDER BY and SQL Server 2012+
         query = "SELECT id, file_uri, parsed_string_text, translation, status, confidence, reason, flag, hashcode FROM smartling_translations WHERE project_id=? AND locale=?"
         params = [project_id, locale]
         if flag is not None:
@@ -715,8 +762,9 @@ async def get_smartling_translations_table(
             elif search_type == "translation":
                 query += " AND translation LIKE ?"
                 params.append(f"%{search_text}%")
-        query += " ORDER BY id LIMIT ? OFFSET ?"
-        params.extend([per_page, (page-1)*per_page])
+        # Use OFFSET-FETCH for SQL Server pagination
+        query += " ORDER BY id OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
+        params.extend([(page-1)*per_page, per_page])
         c.execute(query, params)
         rows = c.fetchall()
         return {"total": count, "page": page, "per_page": per_page, "translations": [
@@ -724,26 +772,26 @@ async def get_smartling_translations_table(
         ]}
 
 @app.post("/admin/smartling-update-reason")
-async def smartling_update_reason(data: dict = Body(...)):
+async def smartling_update_reason(data: dict = Body(...), user=Depends(require_admin_or_user_role)):
     ids = data.get("ids")
     reason = data.get("reason") if "reason" in data else None
     if not ids:
         return JSONResponse(status_code=400, content={"success": False, "message": "Missing ids"})
     if not isinstance(ids, list):
         ids = [ids]
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.executemany("UPDATE smartling_translations SET reason=? WHERE id=?", [(reason, row_id) for row_id in ids])
         conn.commit()
     return {"success": True, "updated": len(ids)}
 
 @app.post("/admin/smartling-toggle-flag")
-async def smartling_toggle_flag(data: dict = Body(...)):
+async def smartling_toggle_flag(data: dict = Body(...), user=Depends(require_admin_or_user_role)):
     row_id = data.get("id")
     flag = data.get("flag")
     if row_id is None or flag is None:
         return JSONResponse(status_code=400, content={"success": False, "message": "Missing id or flag"})
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
         c.execute("UPDATE smartling_translations SET flag=? WHERE id=?", (flag, row_id))
         conn.commit()
@@ -780,7 +828,7 @@ def evaluate_translation(req: TranslationEvalRequest):
     except Exception as e:
         return TranslationEvalResponse(score=0, reason=f"Model output parse error: {str(e)} | Raw: {raw}")
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with get_conn() as conn:
             c = conn.cursor()
             c.execute("UPDATE smartling_translations SET confidence=?, reason=? WHERE parsed_string_text=? AND translation=?", (score, reason, req.source, req.translation))
             conn.commit()
@@ -790,20 +838,20 @@ def evaluate_translation(req: TranslationEvalRequest):
     return TranslationEvalResponse(score=score, reason=reason)
 
 def get_setting(key: str, default=None):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        c.execute("SELECT value FROM settings WHERE [key]=?", (key,))
         row = c.fetchone()
         return row[0] if row else default
 
 def set_setting(key: str, value: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_conn() as conn:
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        c.execute("INSERT OR REPLACE INTO settings ([key], value) VALUES (?, ?)", (key, value))
         conn.commit()
 
 @app.post("/admin/set-model-download-flag")
-def set_model_download_flag(data: dict = Body(...)):
+def set_model_download_flag(data: dict = Body(...), user=Depends(require_admin_role)):
     flag = data.get("download_model", False)
     set_setting("download_model", "true" if flag else "false")
     return {"success": True, "download_model": flag}

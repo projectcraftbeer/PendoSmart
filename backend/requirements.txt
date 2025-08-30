@@ -1,8 +1,8 @@
 fastapi
 uvicorn[standard]
-sqlalchemy
-aiosqlite
 httpx
 python-dotenv
-torch
-transformers
+python-jose
+pyodbc
+pydantic
+requests

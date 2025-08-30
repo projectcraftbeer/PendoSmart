@@ -2,16 +2,18 @@ version: '3.8'
 services:
   backend:
     build: ./backend
-    volumes:
-      - ./backend/strings.db:/app/strings.db
+    env_file: 
+      - ./backend/.env
     ports:
-      - "8000:8000"
+      - "8080:80"
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
 
   frontend:
     build: ./frontend/
+    env_file: 
+      - ./frontend/.env
     ports:
       - "80:80"
     depends_on:

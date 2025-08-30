@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@azure/msal-browser": "^4.15.0",
+    "@vitejs/plugin-vue": "^6.0.0"
+  }
+}

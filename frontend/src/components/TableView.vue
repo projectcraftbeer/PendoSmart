@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed, nextTick } from 'vue'
+import { useAzureAD } from '../composables/useAzureAD'
+const { getAccessToken } = useAzureAD()
 
 
 interface TranslationRow {
@@ -48,39 +50,55 @@ function resetPageOnFlagFilter() {
 }
 
 async function fetchStrings() {
-  loading.value = true
-  error.value = null
+  console.log('[fetchStrings] called', {
+    projectId: props.projectId,
+    locale: props.locale,
+    page: page.value,
+    perPage: perPage.value,
+    flagFilter: flagFilter.value,
+    statusFilter: statusFilter.value,
+    searchType: searchType.value,
+    searchText: searchText.value,
+    refreshKey: props.refreshKey
+  });
+  loading.value = true;
+  error.value = null;
   try {
-    const pid = props.projectId || ''
-    const loc = props.locale || 'ja-JP'
+    const pid = props.projectId || '';
+    const loc = props.locale || 'ja-JP';
     if (!pid) {
-      strings.value = []
-      total.value = 0
-      return
+      console.log('[fetchStrings] projectId missing, aborting fetch');
+      strings.value = [];
+      total.value = 0;
+      return;
     }
-    let url = `http://localhost:8000/admin/smartling-translations-table?project_id=${encodeURIComponent(pid)}&locale=${encodeURIComponent(loc)}&page=${page.value}&per_page=${perPage.value}`
-    if (flagFilter.value === 'flagged') url += '&flag=1'
-    if (flagFilter.value === 'unflagged') url += '&flag=0'
-    if (statusFilter.value === 'completed') url += '&status=completed'
-    if (statusFilter.value === 'pending') url += '&status=pending'
+    let url = `https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-translations-table?project_id=${encodeURIComponent(pid)}&locale=${encodeURIComponent(loc)}&page=${page.value}&per_page=${perPage.value}`;
+    if (flagFilter.value === 'flagged') url += '&flag=1';
+    if (flagFilter.value === 'unflagged') url += '&flag=0';
+    if (statusFilter.value === 'completed') url += '&status=completed';
+    if (statusFilter.value === 'pending') url += '&status=pending';
     if (searchText.value) {
-      url += `&search_type=${encodeURIComponent(searchType.value)}&search_text=${encodeURIComponent(searchText.value)}`
+      url += `&search_type=${encodeURIComponent(searchType.value)}&search_text=${encodeURIComponent(searchText.value)}`;
     }
-    const res = await fetch(url)
-    if (!res.ok) throw new Error('Failed to fetch translations')
-    const data = await res.json()
-    strings.value = data.translations || []
-    total.value = data.total || 0
+    const token = await getAccessToken();
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error('Failed to fetch translations');
+    const data = await res.json();
+    strings.value = data.translations || [];
+    total.value = data.total || 0;
   } catch (e: any) {
-    error.value = e.message
+    error.value = e.message;
+    console.error('[fetchStrings] error:', e);
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 // because TS hates none used stuff. ugh.
 // async function evaluateString(row: StringPair) {
 //   try {
-//     const res = await fetch('http://localhost:8000/evaluate', {
+//     const res = await fetch('/evaluate', {
 //       method: 'POST',
 //       headers: { 'Content-Type': 'application/json' },
 //       body: JSON.stringify({ id: row.id, source: row.source, japanese: row.japanese })
@@ -97,9 +115,10 @@ async function fetchStrings() {
 // TODO: sometimes reason get's updated when refreshing all string. I don't know why. 
 const updateReason = async (row: TranslationRow) => {
   try {
-    const res = await fetch('http://localhost:8000/admin/smartling-update-reason', {
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-update-reason', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ ids: [row.id], reason: row.reason })
     })
     if (!res.ok) throw new Error('Failed to update reason')
@@ -111,9 +130,10 @@ const updateReason = async (row: TranslationRow) => {
 async function toggleFlag(row: TranslationRow) {
   const newFlag = row.flag === 1 ? 0 : 1
   try {
-    const res = await fetch(`http://localhost:8000/admin/smartling-toggle-flag`, {
+    const token = await getAccessToken()
+    const res = await fetch(`https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-toggle-flag`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ id: row.id, flag: newFlag })
     })
     if (!res.ok) throw new Error('Failed to update flag')
@@ -126,9 +146,10 @@ async function toggleFlag(row: TranslationRow) {
 async function toggleStatus(row: TranslationRow) {
   const newStatus = row.status === 'completed' ? 'pending' : 'completed'
   try {
-    const res = await fetch(`http://localhost:8000/admin/smartling-toggle-status`, {
+    const token = await getAccessToken()
+    const res = await fetch(`https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-toggle-status`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ id: row.id, status: newStatus })
     })
     if (!res.ok) throw new Error('Failed to update status')
@@ -141,9 +162,10 @@ async function toggleStatus(row: TranslationRow) {
 async function setAllCompleted() {
   const ids = filteredStrings.value.map(row => row.id)
   try {
-    const res = await fetch(`http://localhost:8000/admin/smartling-bulk-complete`, {
+    const token = await getAccessToken()
+    const res = await fetch(`https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-bulk-complete`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ ids })
     })
     if (!res.ok) throw new Error('Failed to update all statuses')
@@ -156,7 +178,7 @@ async function setAllCompleted() {
 async function evaluateTranslation(row: TranslationRow) {
   evaluatingRow.value = row.id
   try {
-    const res = await fetch('http://localhost:8000/evaluate-translation', {
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/evaluate-translation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: row.parsed_string_text, translation: row.translation })

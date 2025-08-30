@@ -40,3 +40,4 @@ backend/__pycache__/main.cpython-312.pyc
 backend/__pycache__/main.cpython-313.pyc
 backend/__pycache__/smartling_config.cpython-313.pyc
 .vscode/tasks.json
+azuredeploy

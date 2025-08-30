@@ -21,11 +21,17 @@ const jobError = ref<string | null>(null)
 const fetchJobFilesLoading = ref(false)
 const fetchJobFilesResult = ref<string | null>(null)
 
+import { useAzureAD } from '../composables/useAzureAD'
+const { getAccessToken } = useAzureAD()
+
 async function fetchProjectOptions() {
   projectLoading.value = true
   projectError.value = null
   try {
-    const res = await fetch('http://localhost:8000/admin/smartling-projects')
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-projects', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
     if (!res.ok) throw new Error('Failed to fetch Smartling projects')
     const data = await res.json()
     if (Array.isArray(data)) {
@@ -45,7 +51,7 @@ async function getSmartlingToken() {
   authError.value = null
   accessToken.value = ''
   try {
-    const res = await fetch('http://localhost:8000/admin/smartling-auth', {
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -72,7 +78,9 @@ async function fetchJobOptions() {
   jobLoading.value = true
   jobError.value = null
   try {
-    const res = await fetch(`http://localhost:8000/admin/smartling-jobs?project_id=${encodeURIComponent(projectId.value)}`)
+    const token = await getAccessToken()
+    const res = await fetch(`https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-jobs?project_id=${encodeURIComponent(projectId.value)}`,
+      { headers: { 'Authorization': `Bearer ${token}` } })
     if (!res.ok) throw new Error('Failed to fetch Smartling jobs')
     const data = await res.json()
     if (Array.isArray(data)) {
@@ -91,7 +99,10 @@ async function fetchKeys() {
   loading.value = true
   error.value = null
   try {
-    const res = await fetch('http://localhost:8000/admin/smartling-keys')
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-keys', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
     if (!res.ok) throw new Error('Failed to fetch keys')
     const data = await res.json()
     userId.value = data.user_id || ''
@@ -111,13 +122,14 @@ async function saveKeys() {
   loading.value = true
   error.value = null
   try {
+    const token = await getAccessToken()
     const payload: any = { user_id: userId.value, project_id: projectId.value, account_id: accountId.value, job_id: jobId.value, locale: locale.value };
     if (secret.value !== '********') {
       payload.secret = secret.value;
     }
-    const res = await fetch('http://localhost:8000/admin/smartling-keys', {
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-keys', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(payload)
     })
     if (!res.ok) throw new Error('Failed to save keys')
@@ -138,9 +150,10 @@ async function fetchAllJobFiles() {
   fetchJobFilesLoading.value = true
   fetchJobFilesResult.value = null
   try {
-    const res = await fetch('http://localhost:8000/admin/smartling-job-files', {
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-job-files', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ project_id: projectId.value })
     })
     const data = await res.json()
@@ -164,9 +177,10 @@ async function fetchAllTranslations() {
   fetchTranslationsLoading.value = true
   fetchTranslationsResult.value = null
   try {
-    const res = await fetch('http://localhost:8000/admin/smartling-fetch-translations', {
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/smartling-fetch-translations', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ project_id: projectId.value, locale: locale.value })
     })
     const data = await res.json()
@@ -187,7 +201,10 @@ const modelDownloadError = ref<string | null>(null)
 
 async function fetchModelDownloadFlag() {
   try {
-    const res = await fetch('http://localhost:8000/admin/get-model-download-flag')
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/get-model-download-flag', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
     if (!res.ok) throw new Error('Failed to fetch model download flag')
     const data = await res.json()
     modelDownloadFlag.value = !!data.download_model
@@ -200,9 +217,10 @@ async function setModelDownloadFlag(flag: boolean) {
   modelDownloadLoading.value = true
   modelDownloadError.value = null
   try {
-    const res = await fetch('http://localhost:8000/admin/set-model-download-flag', {
+    const token = await getAccessToken()
+    const res = await fetch('https://smartlingbe.yellowpond-6d891245.japaneast.azurecontainerapps.io/admin/set-model-download-flag', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ download_model: flag })
     })
     if (!res.ok) throw new Error('Failed to set model download flag')
